@@ -20,6 +20,7 @@ License: See LICENSE file
 import sys
 import os
 import ctypes
+import glob
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -481,8 +482,15 @@ class MainWindow(QMainWindow):
         
         The detection is automatic and runs when the application starts.
         """
-        # Try to detect FO4 via registry
-        import winreg
+
+        # Detect if this script is being run on Windows or Linux and act accordingly.
+
+        if os.name == 'nt':
+            # Try to detect FO4 via registry
+            import winreg
+        else:
+            # Import fake_winreg as winreg so the script doesn't throw an error on linux systems
+            import fake_winreg as winreg
         
         fo4_path = None
         
@@ -535,11 +543,15 @@ class MainWindow(QMainWindow):
         
         # Method 3: Fallback to common hardcoded paths
         if not fo4_path:
+            home = os.path.expanduser("~")
             common_paths = [
                 r"C:\Program Files (x86)\Steam\steamapps\common\Fallout 4",
                 r"C:\Program Files\Steam\steamapps\common\Fallout 4",
                 r"D:\SteamLibrary\steamapps\common\Fallout 4",
                 r"E:\SteamLibrary\steamapps\common\Fallout 4",
+                rf"{home}/.local/share/Steam/steamapps/common/Fallout 4/Data/",
+                rf"{home}/Games/fallout-4-game-of-the-year-edition/drive_c/GOG Games/Fallout 4 GOTY/",
+                rf"{home}/.var/app/com.usebottles.bottles/data/bottles/bottles/Fallout4/drive_c/"
             ]
             for path in common_paths:
                 if os.path.exists(path):

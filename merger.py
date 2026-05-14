@@ -41,10 +41,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Callable, Dict, Any, List, Tuple
-
 # Note: strings_generator is no longer used - original STRINGS files are preserved
 # inside the merged BA2 archives, and our ESL placeholder doesn't need localization.
-
 
 class BSArchError(Exception):
     """Custom exception for BSArch operations with detailed error information.
@@ -225,6 +223,11 @@ class CCMerger:
             message="bsarch.exe not found. It should be bundled with CC-Packer.",
             operation="initialization"
         )
+    def if_linux():
+        if os.name == 'nt':
+            return "wine"
+        else:
+            return ""
 
     def _run_bsarch(self, args: List[str], operation: str, 
                     archive_name: Optional[str] = None, progress_callback: Optional[Callable[[str], None]] = None,
@@ -267,6 +270,7 @@ class CCMerger:
                 progress_callback(f"  Running: bsarch {' '.join(args[:3])}...")
             
             result = subprocess.run(
+                if_linux(),
                 cmd,
                 capture_output=True,
                 text=True,
@@ -802,12 +806,12 @@ class CCMerger:
         for plugin in cc_plugins:
             # Extract base name (remove extension)
             base_name = plugin.stem  # e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01)'
-            
+            base_name = base_name.casefold()
             # Check for main BA2 (e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01) - Main.ba2')
-            main_ba2 = data_path / f"{base_name} - Main.ba2"
+            main_ba2 = data_path / f"{base_name} - Main.ba2".casefold()
             
             # Check for texture BA2 (e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01) - Textures.ba2')
-            texture_ba2 = data_path / f"{base_name} - Textures.ba2"
+            texture_ba2 = data_path / f"{base_name} - Textures.ba2".casefold()
             
             if main_ba2.exists() and texture_ba2.exists():
                 valid_cc.append(base_name)

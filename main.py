@@ -12,8 +12,8 @@ Classes:
     RestoreWorker: Background thread worker for restore operations
     MainWindow: Main application window with UI and controls
 
-Author: CC Packer Development Team
-Version: 3.1.0
+Author: jturnley (original), Fork maintained for Linux compatibility
+Version: 3.2.0-cross-compatible
 License: See LICENSE file
 """
 
@@ -23,9 +23,10 @@ import ctypes
 import glob
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                            QTextEdit, QFileDialog, QMessageBox)
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                            QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                            QTextEdit, QFileDialog, QMessageBox, QDialog,
+                            QScrollArea, QDialogButtonBox)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from merger import CCMerger
 
@@ -161,7 +162,7 @@ class MainWindow(QMainWindow):
         attempts to auto-detect the Fallout 4 installation path.
         """
         super().__init__()
-        self.setWindowTitle("CC-Packer v3.1.0")
+        self.setWindowTitle("CC-Packer v3.2.0-cross-compatible")
         self.setGeometry(100, 100, 800, 600)
         self.merger = CCMerger()
         self.worker = None
@@ -180,7 +181,7 @@ class MainWindow(QMainWindow):
         
         The UI uses PyQt6 layouts for responsive design.
         """
-        self.setWindowTitle("CC Packer v3.1.0")
+        self.setWindowTitle("CC Packer v3.2.0-cross-compatible")
         self.setMinimumSize(600, 500)
 
         central_widget = QWidget()
@@ -483,45 +484,62 @@ class MainWindow(QMainWindow):
         The detection is automatic and runs when the application starts.
         """
 
-        # Detect if this script is being run on Windows or Linux and act accordingly.
-
+        # Try to detect FO4 via registry (Windows only)
         if os.name == 'nt':
-            # Try to detect FO4 via registry
             import winreg
         else:
-            # Import fake_winreg as winreg so the script doesn't throw an error on linux systems
-            import fake_winreg as winreg
+            # On Linux, try fake_winreg if installed, otherwise skip registry detection
+            try:
+                import fake_winreg as winreg
+            except ImportError:
+                winreg = None
         
         fo4_path = None
         
-        # Method 1: Check Bethesda's Fallout 4 registry key directly
-        try:
-            for reg_path in [
-                r"SOFTWARE\WOW6432Node\Bethesda Softworks\Fallout4",
-                r"SOFTWARE\Bethesda Softworks\Fallout4"
-            ]:
-                try:
-                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
-                        path = winreg.QueryValueEx(key, "Installed Path")[0]
-                        if path and os.path.exists(path):
-                            fo4_path = path.rstrip("\\")
-                            break
-                except (FileNotFoundError, OSError):
-                    continue
-        except Exception as e:
-            self.log(f"Registry detection error: {e}")
+        # Method 1: Check Bethesda's Fallout 4 registry key directly (Windows only)
+        if winreg is not None:
+            try:
+                for reg_path in [
+                    r"SOFTWARE\WOW6432Node\Bethesda Softworks\Fallout4",
+                    r"SOFTWARE\Bethesda Softworks\Fallout4"
+                ]:
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+                            path = winreg.QueryValueEx(key, "Installed Path")[0]
+                            if path and os.path.exists(path):
+                                fo4_path = path.rstrip("\\")
+                                break
+                    except (FileNotFoundError, OSError):
+                        continue
+            except Exception as e:
+                self.log(f"Registry detection error: {e}")
         
         # Method 2: Fallback - check Steam library folders
         if not fo4_path:
             try:
                 steam_path = None
-                for reg_path in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]:
-                    try:
-                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
-                            steam_path = winreg.QueryValueEx(key, "InstallPath")[0]
+                # Windows: try registry first
+                if winreg is not None:
+                    for reg_path in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]:
+                        try:
+                            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+                                steam_path = winreg.QueryValueEx(key, "InstallPath")[0]
+                                break
+                        except (FileNotFoundError, OSError):
+                            continue
+                
+                # Linux: check common Steam install locations
+                if steam_path is None and os.name != 'nt':
+                    home = os.path.expanduser("~")
+                    linux_steam_paths = [
+                        f"{home}/.steam/steam",
+                        f"{home}/.local/share/Steam",
+                        f"{home}/.steam/root",
+                    ]
+                    for sp in linux_steam_paths:
+                        if os.path.exists(sp):
+                            steam_path = sp
                             break
-                    except (FileNotFoundError, OSError):
-                        continue
                 
                 if steam_path:
                     vdf_path = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
@@ -549,10 +567,19 @@ class MainWindow(QMainWindow):
                 r"C:\Program Files\Steam\steamapps\common\Fallout 4",
                 r"D:\SteamLibrary\steamapps\common\Fallout 4",
                 r"E:\SteamLibrary\steamapps\common\Fallout 4",
-                rf"{home}/.local/share/Steam/steamapps/common/Fallout 4/Data/",
-                rf"{home}/Games/fallout-4-game-of-the-year-edition/drive_c/GOG Games/Fallout 4 GOTY/",
-                rf"{home}/.var/app/com.usebottles.bottles/data/bottles/bottles/Fallout4/drive_c/"
             ]
+            
+            # Linux-specific paths (Steam native, Proton, Bottles, Lutris, Heroic)
+            if os.name != 'nt':
+                common_paths.extend([
+                    f"{home}/.local/share/Steam/steamapps/common/Fallout 4",
+                    f"{home}/.steam/steam/steamapps/common/Fallout 4",
+                    f"{home}/.local/share/Steam/compatibilitytools.d/Fallout 4",
+                    f"{home}/Games/fallout-4-game-of-the-year-edition/drive_c/GOG Games/Fallout 4 GOTY",
+                    f"{home}/.var/app/com.usebottles.bottles/data/bottles/bottles/Fallout4/drive_c/Program Files (x86)/Steam/steamapps/common/Fallout 4",
+                    f"{home}/.local/share/lutris/runners/wine/lutris-*/x86_64/bin/Fallout 4",
+                    f"{home}/.config/heroic/SteamWin/steamapps/common/Fallout 4",
+                ])
             for path in common_paths:
                 if os.path.exists(path):
                     fo4_path = path
@@ -590,13 +617,16 @@ class MainWindow(QMainWindow):
         
         When CC content validation detects incomplete items (plugins missing their
         BA2 archives), this method displays a rich-text warning dialog explaining
-        the situation and offering three options:
-        
+        the situation and offering four options:
+
         1. **Delete and Cancel**: Deletes the orphaned files, then stops so the
            user can re-download the content from the Creations menu in-game.
         2. **Delete and Continue**: Deletes the orphaned files and proceeds with
            merging the remaining valid CC content.
-        3. **Cancel Without Changes**: Makes no modifications and aborts the merge.
+        3. **Keep and Continue**: Leaves orphaned files in place and proceeds with
+           merging valid CC items. Not recommended — orphaned ESL plugins may
+           contain references to missing assets.
+        4. **Cancel Without Changes**: Makes no modifications and aborts the merge.
         
         The dialog includes a clickable link to the CC Packer Nexus Mods page
         for more information about the orphaned content issue.
@@ -614,57 +644,100 @@ class MainWindow(QMainWindow):
             Optional[str]: One of the following:
                 - 'continue': Orphaned content was successfully deleted; caller
                   should re-validate and proceed with merging.
+                - 'keep_orphaned': User chose to keep orphaned files and proceed
+                  with merging valid CC items without deletion.
                 - 'quit': User chose to stop (with or without deletion).
                 - None: An error occurred during deletion or user cancelled;
                   caller should abort the merge.
         """
         
-        # Format the list of orphaned items with HTML for better visibility
-        orphaned_list = "<br>".join([f"&nbsp;&nbsp;&nbsp;&nbsp;<b>{name}</b>" for name in orphaned_names])
-        
-        # Create custom message box with clickable link
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Incomplete Creation Club Content Detected")
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-        
-        # Build message with rich text for clickable link
-        message = (
-            "The following Creation Club items are missing their required BA2 archive files:<br><br>"
-            f"{orphaned_list}<br><br>"
+        # Build the orphaned items list as HTML
+        orphaned_list_html = "".join([f"<b>{name}</b><br>" for name in orphaned_names])
+
+        # Create custom dialog with scrollable orphan list
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Incomplete Creation Club Content Detected")
+        dialog.setMinimumSize(600, 450)
+
+        layout = QVBoxLayout(dialog)
+
+        # Warning header
+        header = QLabel("The following Creation Club items are missing their required BA2 archive files:")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        # Scrollable orphan list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(200)
+        list_widget = QLabel(orphaned_list_html)
+        list_widget.setTextFormat(Qt.TextFormat.RichText)
+        list_widget.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        list_widget.setStyleSheet("padding: 8px;")
+        scroll.setWidget(list_widget)
+        layout.addWidget(scroll)
+
+        # Explanation text with clickable link
+        explanation = QLabel(
             "You may continue, but these items will not function and may cause instability "
             "or crashing until you have deleted and re-downloaded them from the Creations Shop "
             "on the Fallout 4 main menu.<br><br>"
             "Note that this is not an issue with CC Packer; it is a known issue with the "
             "download engine built into the game.<br><br>"
-            "I can automatically delete the affected incomplete CC items for you, I can delete them "
-            "and continue packing the remaining files, or you can cancel packing to do the deletions "
-            "and re-download them yourself.<br><br>"
+            "Select an action below to delete the affected incomplete CC items, keep them "
+            "and continue packing (not recommended — they may contain references to missing assets), "
+            "or cancel packing to re-download them manually.<br><br>"
             'See the <a href="https://www.nexusmods.com/fallout4/mods/98589?tab=description">CC Packer main page</a> '
             "on Nexus Mods for more information."
         )
-        
-        msg_box.setText(message)
-        msg_box.setTextFormat(Qt.TextFormat.RichText)
-        msg_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        
-        # Add custom buttons
-        delete_quit_btn = msg_box.addButton("Delete Orphaned CC Content And Cancel Packing", QMessageBox.ButtonRole.DestructiveRole)
-        delete_continue_btn = msg_box.addButton("Delete Orphaned CC Content and Continue", QMessageBox.ButtonRole.AcceptRole)
-        _quit_btn = msg_box.addButton("Make No Changes and Cancel Packing Now", QMessageBox.ButtonRole.RejectRole)
-        
-        msg_box.exec()
-        clicked = msg_box.clickedButton()
-        
+        explanation.setWordWrap(True)
+        explanation.setTextFormat(Qt.TextFormat.RichText)
+        explanation.setOpenExternalLinks(True)
+        explanation.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        layout.addWidget(explanation)
+
+        # Buttons
+        delete_quit_btn = QPushButton("Delete Orphaned CC Content And Cancel Packing")
+        delete_quit_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 8px;")
+        delete_continue_btn = QPushButton("Delete Orphaned CC Content and Continue")
+        delete_continue_btn.setStyleSheet("background-color: #f57c00; color: white; font-weight: bold; padding: 8px;")
+        keep_continue_btn = QPushButton("Keep Orphaned Files and Continue (Not Recommended)")
+        _quit_btn = QPushButton("Make No Changes and Cancel Packing Now")
+
+        for btn in [delete_quit_btn, delete_continue_btn, keep_continue_btn, _quit_btn]:
+            btn.setMinimumWidth(320)
+
+        btn_layout = QVBoxLayout()
+        btn_layout.addWidget(delete_quit_btn)
+        btn_layout.addWidget(delete_continue_btn)
+        btn_layout.addWidget(keep_continue_btn)
+        btn_layout.addWidget(_quit_btn)
+        layout.addLayout(btn_layout)
+
+        clicked_button = None
+
+        def on_clicked(btn):
+            nonlocal clicked_button
+            clicked_button = btn
+            dialog.accept()
+
+        delete_quit_btn.clicked.connect(lambda: on_clicked(delete_quit_btn))
+        delete_continue_btn.clicked.connect(lambda: on_clicked(delete_continue_btn))
+        keep_continue_btn.clicked.connect(lambda: on_clicked(keep_continue_btn))
+        _quit_btn.clicked.connect(lambda: on_clicked(_quit_btn))
+
+        dialog.exec()
+
         # Handle user choice
         data_path = Path(fo4_path) / "Data"
-        
-        if clicked == delete_quit_btn or clicked == delete_continue_btn:
+
+        if clicked_button == delete_quit_btn or clicked_button == delete_continue_btn:
             # Delete orphaned content
             self.log("Deleting orphaned Creation Club content...")
             success, message = self.merger.delete_orphaned_cc_content(
                 data_path, orphaned_names, self.log
             )
-            
+
             if not success:
                 QMessageBox.critical(
                     self,
@@ -673,16 +746,20 @@ class MainWindow(QMainWindow):
                     "You may need to run CC Packer as Administrator."
                 )
                 return None
-            
+
             self.log(message)
-            
-            if clicked == delete_quit_btn:
+
+            if clicked_button == delete_quit_btn:
                 self.log("User chose to quit after deletion.")
                 return 'quit'
             else:
                 self.log("Continuing with merge after deletion...")
                 return 'continue'
-        
+
+        elif clicked_button == keep_continue_btn:
+            self.log("User chose to keep orphaned files and continue merging valid CC items.")
+            return 'keep_orphaned'
+
         else:  # quit_btn
             self.log("User chose to quit without deletion.")
             return 'quit'
@@ -706,7 +783,8 @@ class MainWindow(QMainWindow):
         - If incomplete CC items are found, user can choose to:
           a) Delete orphaned content and quit
           b) Delete orphaned content and continue merging
-          c) Quit without changes
+          c) Keep orphaned files and continue (not recommended — ESLs may reference missing assets)
+          d) Quit without changes
         - After deletion, re-validates to ensure cleanup succeeded
         - Only proceeds with merge if validation passes
         """
@@ -747,15 +825,19 @@ class MainWindow(QMainWindow):
         # Handle orphaned content if found
         if orphaned_cc:
             result = self._handle_orphaned_cc_content(fo4, orphaned_cc)
-            
-            if result == 'quit':
+
+            if result == 'keep_orphaned':
+                # User chose to keep orphaned files, proceed with valid items only
+                self.log(f"Proceeding with merge of {len(valid_cc)} valid CC item(s).")
+                self.log("Orphaned plugin files will remain in place (may reference missing assets).")
+            elif result == 'quit':
                 # User chose to quit
                 return
             elif result == 'continue':
                 # Orphaned content was deleted, refresh validation
                 self.log("Re-validating after deletion...")
                 valid_cc, orphaned_cc = self.merger.validate_cc_content_integrity(data_path, self.log)
-                
+
                 if orphaned_cc:
                     QMessageBox.critical(
                         self,
@@ -763,7 +845,7 @@ class MainWindow(QMainWindow):
                         "Orphaned content still detected after deletion. Please check manually."
                     )
                     return
-                
+
                 if not valid_cc:
                     QMessageBox.information(
                         self,

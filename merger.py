@@ -27,8 +27,8 @@ Classes:
     BSArchError: Custom exception for BSArch operation failures
     CCMerger: Main class that orchestrates all merge/restore operations
 
-Author: CC Packer Development Team
-Version: 3.1.0
+Author: jturnley (original), Fork maintained for Linux compatibility
+Version: 3.2.0-cross-compatible
 License: See LICENSE file
 """
 
@@ -43,6 +43,28 @@ from datetime import datetime
 from typing import Optional, Callable, Dict, Any, List, Tuple
 # Note: strings_generator is no longer used - original STRINGS files are preserved
 # inside the merged BA2 archives, and our ESL placeholder doesn't need localization.
+
+
+def _find_file_case_insensitive(directory: Path, filename: str) -> Optional[Path]:
+    """Find a file in a directory using case-insensitive matching.
+
+    Required on case-sensitive filesystems (ext4 on Linux) where filenames
+    may differ in case from what the code expects. On Windows (NTFS) this
+    works transparently via the filesystem.
+
+    Args:
+        directory: Directory to search in.
+        filename: Expected filename to match.
+
+    Returns:
+        The matching Path, or None if no match is found.
+    """
+    target = filename.lower()
+    for entry in directory.iterdir():
+        if entry.is_file() and entry.name.lower() == target:
+            return entry
+    return None
+
 
 class BSArchError(Exception):
     """Custom exception for BSArch operations with detailed error information.
@@ -126,24 +148,24 @@ class CCMerger:
         self.logger = logging.getLogger("CCPacker")
         logging.basicConfig(level=logging.INFO)
         self._last_error_details = None  # Store detailed error info
-        self._bsarch_path = None  # Cache bsarch.exe path
+        self._bsarch_path = None  # Cache bsarch path
         self._cc_list: set[str] = self._load_cc_list()  # Load known CC items
 
     def _load_cc_list(self) -> set[str]:
         """Load the list of known Creation Club items from CCList.txt.
-        
+
         Reads the CCList.txt file (containing all official CC items) and creates
         a set of filenames for quick lookup. This file is used to validate that
         only actual CC content is detected for merging, preventing files that
         happen to start with 'cc' from being incorrectly included.
-        
+
         The CCList.txt file should be located in the same directory as the
         application script or in the PyInstaller bundle root.
-        
+
         Returns:
             set: Set of CC filenames (e.g., 'ccBGSFO4001-PipBoy.esl')
                 Empty set if file cannot be loaded.
-        
+
         Raises:
             Does not raise exceptions - returns empty set if file not found,
             allowing the application to continue with fallback behavior.
@@ -156,49 +178,53 @@ class CCMerger:
             else:
                 # Running as script
                 base_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-            
+
             cc_list_path = Path(base_dir) / "CCList.txt"
-            
+
             if not cc_list_path.exists():
                 self.logger.warning(f"CCList.txt not found at {cc_list_path}. Using fallback detection.")
                 return set[str]()
-            
+
             cc_set: set[str] = set()
             with open(cc_list_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
                     if line:  # Skip empty lines
                         cc_set.add(line.lower())  # Store lowercase for case-insensitive matching
-            
+
             self.logger.info(f"Loaded {len(cc_set)} known CC items from CCList.txt")
             return cc_set
-            
+
         except Exception as e:
             self.logger.warning(f"Failed to load CCList.txt: {e}. Using fallback detection.")
             return set[str]()
 
     def _find_bsarch(self) -> str:
         """Find bsarch.exe bundled with the application.
-        
-        Searches for bsarch.exe in multiple locations depending on whether
+
+        Searches for bsarch in multiple locations depending on whether
         the application is running as a PyInstaller bundle or as a Python script.
-        
+
         Search locations (in order):
         1. PyInstaller _MEIPASS directory (for bundled exe)
         2. Directory containing the executable
         3. Current working directory
-        
+        4. System paths on Linux (/usr/bin/bsarch, /usr/local/bin/bsarch)
+
+        Uses case-insensitive matching to handle filesystem differences
+        between Windows (NTFS) and Linux (ext4).
+
         The path is cached after first successful lookup.
-        
+
         Returns:
-            str: Absolute path to bsarch.exe
-            
+            str: Absolute path to bsarch executable
+
         Raises:
-            BSArchError: If bsarch.exe cannot be found in any location
+            BSArchError: If bsarch cannot be found in any location
         """
         if self._bsarch_path and os.path.exists(self._bsarch_path):
             return self._bsarch_path
-        
+
         # When running as a PyInstaller bundle, files are extracted to a temp directory
         # sys._MEIPASS contains the path to that directory
         if getattr(sys, 'frozen', False):
@@ -207,27 +233,41 @@ class CCMerger:
         else:
             # Running as script
             bundle_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        
-        possible_paths = [
-            Path(bundle_dir) / "bsarch.exe",  # PyInstaller bundle or same dir as script
-            Path(sys.executable).parent / "bsarch.exe",  # Same dir as exe
-            Path(".") / "bsarch.exe",  # Current directory
+
+        search_dirs = [
+            bundle_dir,
+            Path(sys.executable).parent,
+            Path("."),
         ]
-        
-        for p in possible_paths:
-            if p.exists():
-                self._bsarch_path = str(p.resolve())
-                return self._bsarch_path
-        
+
+        if os.name != 'nt':
+            search_dirs.extend([
+                Path("/usr/bin"),
+                Path("/usr/local/bin"),
+            ])
+
+        # Try each directory with case-insensitive matching
+        for search_dir in search_dirs:
+            if not search_dir.is_dir():
+                continue
+            # Try common bsarch filenames case-insensitively
+            for filename in ["bsarch.exe", "bsarch"]:
+                found = _find_file_case_insensitive(search_dir, filename)
+                if found is not None:
+                    self._bsarch_path = str(found.resolve())
+                    return self._bsarch_path
+
         raise BSArchError(
-            message="bsarch.exe not found. It should be bundled with CC-Packer.",
+            message="bsarch not found. It should be bundled with CC-Packer, or install it system-wide.",
             operation="initialization"
         )
-    def if_linux():
-        if os.name == 'nt':
+
+    @staticmethod
+    def _get_wine_prefix() -> str:
+        """Return 'wine' on Linux to run Windows executables, empty string on Windows."""
+        if os.name != 'nt':
             return "wine"
-        else:
-            return ""
+        return ""
 
     def _run_bsarch(self, args: List[str], operation: str, 
                     archive_name: Optional[str] = None, progress_callback: Optional[Callable[[str], None]] = None,
@@ -269,15 +309,21 @@ class CCMerger:
             if progress_callback:
                 progress_callback(f"  Running: bsarch {' '.join(args[:3])}...")
             
-            result = subprocess.run(
-                if_linux(),
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(cwd) if cwd else None,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            wine_prefix = self._get_wine_prefix()
+            full_cmd = [wine_prefix] + cmd if wine_prefix else cmd
+            
+            kwargs: Dict[str, Any] = {
+                'args': full_cmd,
+                'capture_output': True,
+                'text': True,
+                'timeout': timeout,
+                'cwd': str(cwd) if cwd else None,
+            }
+            
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
+            result = subprocess.run(**kwargs)
             
             if result.returncode != 0:
                 error_msg = self._parse_bsarch_error(result.stderr, result.stdout, result.returncode)
@@ -300,7 +346,7 @@ class CCMerger:
             )
         except FileNotFoundError:
             raise BSArchError(
-                message=f"bsarch.exe not found at: {bsarch_path}",
+                message=f"bsarch not found at: {bsarch_path}",
                 operation=operation,
                 archive_path=archive_name
             )
@@ -747,13 +793,13 @@ class CCMerger:
             ...     print(p.name)  # e.g., 'ccBGSFO4001-PipBoy.esl'
         """
         cc_plugins: List[Path] = []
-        
+
         # If we have a loaded CC list, use it directly for validation
         if self._cc_list:
             # Look for files in the CC list that exist in the data directory
             for cc_filename in self._cc_list:
-                plugin_path = data_path / cc_filename
-                if plugin_path.exists():
+                plugin_path = _find_file_case_insensitive(data_path, cc_filename)
+                if plugin_path is not None:
                     cc_plugins.append(plugin_path)
         else:
             # Fallback to old behavior if CCList.txt couldn't be loaded
@@ -806,23 +852,22 @@ class CCMerger:
         for plugin in cc_plugins:
             # Extract base name (remove extension)
             base_name = plugin.stem  # e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01)'
-            base_name = base_name.casefold()
             # Check for main BA2 (e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01) - Main.ba2')
-            main_ba2 = data_path / f"{base_name} - Main.ba2".casefold()
-            
+            main_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Main.ba2")
+
             # Check for texture BA2 (e.g., 'ccBGSFO4001-PipBoy(Pip-BoyPack01) - Textures.ba2')
-            texture_ba2 = data_path / f"{base_name} - Textures.ba2".casefold()
-            
-            if main_ba2.exists() and texture_ba2.exists():
+            texture_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Textures.ba2")
+
+            if main_ba2 is not None and texture_ba2 is not None:
                 valid_cc.append(base_name)
                 if progress_callback:
                     progress_callback(f"  ✓ {plugin.name} - Complete")
             else:
                 orphaned_cc.append(base_name)
                 missing: List[str] = []
-                if not main_ba2.exists():
+                if main_ba2 is None:
                     missing.append("Main")
-                if not texture_ba2.exists():
+                if texture_ba2 is None:
                     missing.append("Textures")
                 if progress_callback:
                     progress_callback(f"  ✗ {plugin.name} - Missing: {', '.join(missing)}")
@@ -871,16 +916,16 @@ class CCMerger:
             
             # Plugin files (esl, esp, esm)
             for ext in ['.esl', '.esp', '.esm']:
-                plugin_file = data_path / f"{base_name}{ext}"
-                if plugin_file.exists():
+                plugin_file = _find_file_case_insensitive(data_path, f"{base_name}{ext}")
+                if plugin_file is not None:
                     files_to_delete.append(plugin_file)
-            
+
             # BA2 archives (Main and Textures)
-            main_ba2 = data_path / f"{base_name} - Main.ba2"
-            texture_ba2 = data_path / f"{base_name} - Textures.ba2"
-            if main_ba2.exists():
+            main_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Main.ba2")
+            texture_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Textures.ba2")
+            if main_ba2 is not None:
                 files_to_delete.append(main_ba2)
-            if texture_ba2.exists():
+            if texture_ba2 is not None:
                 files_to_delete.append(texture_ba2)
             
             # Delete all found files
@@ -997,10 +1042,12 @@ class CCMerger:
         # Build list of BA2 files from valid CC plugins
         cc_files: List[Path] = []
         for base_name in valid_cc:
-            main_ba2 = data_path / f"{base_name} - Main.ba2"
-            texture_ba2 = data_path / f"{base_name} - Textures.ba2"
-            cc_files.append(main_ba2)
-            cc_files.append(texture_ba2)
+            main_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Main.ba2")
+            texture_ba2 = _find_file_case_insensitive(data_path, f"{base_name} - Textures.ba2")
+            if main_ba2:
+                cc_files.append(main_ba2)
+            if texture_ba2:
+                cc_files.append(texture_ba2)
 
         # Check if merged files already exist (optional cleanup warning)
         existing_merged = list(data_path.glob("CCPacked*.ba2"))
